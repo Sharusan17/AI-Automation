@@ -5,16 +5,28 @@ const fs = require("fs");
 const path = require("path");
 
 const app = express();
-const upload = multer({ dest: "/tmp" });
 
-// Health check
+// ✅ Keep uploads in /tmp (Render allows this)
+const upload = multer({
+  dest: "/tmp",
+  limits: {
+    fileSize: 200 * 1024 * 1024, // 200MB safeguard
+  },
+});
+
+// ✅ Health check
 app.get("/", (req, res) => {
   res.json({ ok: true, message: "FFmpeg Render API is running" });
 });
 
+// ✅ Extra health endpoint (handy for monitoring)
+app.get("/health", (req, res) => {
+  res.json({ ok: true });
+});
+
 /**
  * POST /render
- * form-data:
+ * multipart/form-data:
  * - video: mp4 (background video)
  * - audio: mp3 (voice)
  * - captions: srt (optional)
@@ -26,13 +38,51 @@ app.post(
   upload.fields([
     { name: "video", maxCount: 1 },
     { name: "audio", maxCount: 1 },
-    { name: "captions", maxCount: 1 }
+    { name: "captions", maxCount: 1 },
   ]),
   async (req, res) => {
+    const requestId = `req_${Date.now()}_${Math.floor(Math.random() * 100000)}`;
+
     try {
+      console.log(`\n==============================`);
+      console.log(`[${requestId}] Incoming POST /render`);
+      console.log(`[${requestId}] Time: ${new Date().toISOString()}`);
+
+      // ✅ Log what keys arrived
+      console.log(
+        `[${requestId}] req.files keys:`,
+        Object.keys(req.files || {})
+      );
+      console.log(`[${requestId}] req.body:`, req.body || {});
+
+      // ✅ Detailed file logs (video/audio/captions)
+      const logFile = (label, fileObj) => {
+        if (!fileObj) {
+          console.log(`[${requestId}] ${label}: NOT PROVIDED`);
+          return;
+        }
+        console.log(`[${requestId}] ${label}:`, {
+          fieldname: fileObj.fieldname,
+          originalname: fileObj.originalname,
+          mimetype: fileObj.mimetype,
+          size: fileObj.size,
+          path: fileObj.path,
+        });
+      };
+
+      logFile("VIDEO", req.files?.video?.[0]);
+      logFile("AUDIO", req.files?.audio?.[0]);
+      logFile("CAPTIONS", req.files?.captions?.[0]);
+
+      // ✅ Validate required uploads
       if (!req.files?.video?.[0] || !req.files?.audio?.[0]) {
+        console.log(
+          `[${requestId}] ERROR: Missing required files (video/audio)`
+        );
         return res.status(400).json({
-          error: "Missing required files: video and audio"
+          error: "Missing required files: video and audio",
+          requestId,
+          receivedFiles: Object.keys(req.files || {}),
         });
       }
 
@@ -42,14 +92,21 @@ app.post(
 
       const outPath = path.join("/tmp", `final_${Date.now()}.mp4`);
 
-      // Build filter
-      // TikTok 9:16 crop + subtitles if provided
-      let filter = "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920";
+      console.log(`[${requestId}] videoPath: ${videoPath}`);
+      console.log(`[${requestId}] audioPath: ${audioPath}`);
+      console.log(`[${requestId}] captionsPath: ${captionsPath || "(none)"}`);
+      console.log(`[${requestId}] outPath: ${outPath}`);
+
+      // ✅ Build filter: TikTok 9:16 crop + captions if provided
+      let filter =
+        "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920";
 
       if (captionsPath) {
-        // Burn captions with readable style
+        // Burn captions with readable style (bottom center)
         filter += `,subtitles=${captionsPath}:force_style='Fontsize=48,Outline=2,BorderStyle=1,Shadow=0,Alignment=2,MarginV=80'`;
       }
+
+      console.log(`[${requestId}] FFmpeg filter: ${filter}`);
 
       const args = [
         "-y",
@@ -72,34 +129,101 @@ app.post(
         "aac",
         "-b:a",
         "192k",
-        outPath
+        outPath,
       ];
 
+      console.log(`[${requestId}] FFmpeg args:`, args);
+
+      const start = Date.now();
+
       execFile("ffmpeg", args, (err, stdout, stderr) => {
+        const durationMs = Date.now() - start;
+
+        // ✅ Always log FFmpeg output (trim to avoid huge logs)
+        if (stdout) {
+          console.log(
+            `[${requestId}] FFmpeg stdout (first 2000 chars):\n${stdout
+              .toString()
+              .slice(0, 2000)}`
+          );
+        }
+
+        if (stderr) {
+          console.log(
+            `[${requestId}] FFmpeg stderr (first 4000 chars):\n${stderr
+              .toString()
+              .slice(0, 4000)}`
+          );
+        }
+
+        console.log(
+          `[${requestId}] FFmpeg completed in ${durationMs}ms`
+        );
+
         if (err) {
-          console.error("FFmpeg error:", stderr);
+          console.error(`[${requestId}] FFmpeg FAILED:`, err);
           return res.status(500).json({
             error: "FFmpeg failed",
-            details: stderr?.toString()?.slice(0, 2000)
+            requestId,
+            details: stderr?.toString()?.slice(0, 2000),
           });
         }
 
+        // ✅ Ensure output exists
+        if (!fs.existsSync(outPath)) {
+          console.error(`[${requestId}] Output file not found: ${outPath}`);
+          return res.status(500).json({
+            error: "Output file not generated",
+            requestId,
+          });
+        }
+
+        const finalStats = fs.statSync(outPath);
+        console.log(
+          `[${requestId}] Output file size: ${finalStats.size} bytes`
+        );
+
         res.setHeader("Content-Type", "video/mp4");
-        res.setHeader("Content-Disposition", "attachment; filename=final.mp4");
+        res.setHeader(
+          "Content-Disposition",
+          "attachment; filename=final.mp4"
+        );
+        res.setHeader("X-Request-Id", requestId);
 
         const stream = fs.createReadStream(outPath);
         stream.pipe(res);
 
-        // cleanup
         stream.on("close", () => {
+          console.log(`[${requestId}] Response stream closed. Cleaning up...`);
+
           [videoPath, audioPath, captionsPath, outPath].forEach((p) => {
-            if (p && fs.existsSync(p)) fs.unlinkSync(p);
+            if (p && fs.existsSync(p)) {
+              try {
+                fs.unlinkSync(p);
+                console.log(`[${requestId}] Deleted: ${p}`);
+              } catch (e) {
+                console.log(
+                  `[${requestId}] Failed to delete ${p}: ${e.message}`
+                );
+              }
+            }
           });
+
+          console.log(`[${requestId}] Cleanup complete.`);
+          console.log(`==============================\n`);
+        });
+
+        stream.on("error", (e) => {
+          console.error(`[${requestId}] Stream error: ${e.message}`);
         });
       });
     } catch (e) {
-      console.error(e);
-      return res.status(500).json({ error: "Server error", details: e.message });
+      console.error(`[${requestId}] Server error:`, e);
+      return res.status(500).json({
+        error: "Server error",
+        requestId,
+        details: e.message,
+      });
     }
   }
 );
