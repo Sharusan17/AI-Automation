@@ -58,29 +58,30 @@ app.post(
 
       const args = [
         "-y",
-        "-stream_loop",
-        "-1",
-        "-i",
-        videoPath,
-        "-i",
-        audioPath,
-        "-t",
-        "60", // ⛔ HARD LIMIT — prevents runaway jobs
+      
+        // Input
+        "-i", videoPath,
+        "-i", audioPath,
+      
+        // Duration control
+        "-t", "60",
         "-shortest",
-        "-vf",
-        filter,
-        "-r",
-        "30",
-        "-c:v",
-        "libx264",
-        "-preset",
-        "veryfast",
-        "-pix_fmt",
-        "yuv420p",
-        "-c:a",
-        "aac",
-        "-b:a",
-        "128k",
+      
+        // Video
+        "-vf", filter,
+        "-r", "30",
+        "-c:v", "libx264",
+        "-preset", "ultrafast",
+        "-threads", "2",
+        "-pix_fmt", "yuv420p",
+      
+        // Audio
+        "-c:a", "aac",
+        "-b:a", "128k",
+      
+        // Fast MP4
+        "-movflags", "+faststart",
+      
         outPath,
       ];
 
