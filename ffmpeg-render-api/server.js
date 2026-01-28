@@ -23,6 +23,34 @@ app.get("/health", (req, res) => {
   res.json({ ok: true });
 });
 
+// ✅ DOWNLOAD ENDPOINT
+app.get("/download/:filename", (req, res) => {
+  const filePath = path.join("/tmp", req.params.filename);
+
+  if (!fs.existsSync(filePath)) {
+    return res.status(404).json({ error: "File not found" });
+  }
+
+  res.setHeader("Content-Type", "video/mp4");
+  res.setHeader(
+    "Content-Disposition",
+    `attachment; filename=${req.params.filename}`
+  );
+
+  const stream = fs.createReadStream(filePath);
+  stream.pipe(res);
+
+  stream.on("close", () => {
+    try {
+      fs.unlinkSync(filePath);
+      console.log(`Deleted ${filePath}`);
+    } catch (e) {
+      console.error("Cleanup failed:", e.message);
+    }
+  });
+});
+
+// ✅ RENDER ENDPOINT
 app.post(
   "/render",
   upload.fields([
@@ -47,7 +75,8 @@ app.post(
       const audioPath = req.files.audio[0].path;
       const captionsPath = req.files?.captions?.[0]?.path || null;
 
-      const outPath = path.join("/tmp", `final_${Date.now()}.mp4`);
+      const filename = `final_${Date.now()}.mp4`;
+      const outPath = path.join("/tmp", filename);
 
       let filter =
         "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920";
@@ -58,15 +87,15 @@ app.post(
 
       const args = [
         "-y",
-      
+
         // Input
         "-i", videoPath,
         "-i", audioPath,
-      
-        // Duration control
+
+        // Duration
         "-t", "60",
         "-shortest",
-      
+
         // Video
         "-vf", filter,
         "-r", "30",
@@ -74,24 +103,23 @@ app.post(
         "-preset", "ultrafast",
         "-threads", "2",
         "-pix_fmt", "yuv420p",
-      
+
         // Audio
         "-c:a", "aac",
         "-b:a", "128k",
-      
+
         // Fast MP4
         "-movflags", "+faststart",
-      
+
         outPath,
       ];
 
       console.log(`[${requestId}] FFmpeg starting...`);
-
       const start = Date.now();
 
       execFile("ffmpeg", args, (err, stdout, stderr) => {
-        const duration = Date.now() - start;
-        console.log(`[${requestId}] FFmpeg finished in ${duration}ms`);
+        const durationMs = Date.now() - start;
+        console.log(`[${requestId}] FFmpeg finished in ${durationMs}ms`);
 
         if (stderr) {
           console.log(
@@ -115,19 +143,19 @@ app.post(
 
         const stats = fs.statSync(outPath);
 
-        // ✅ IMPORTANT: DO NOT STREAM FILE
-        // Just return metadata for now
+        // ✅ RETURN DOWNLOAD LINK (THIS IS THE KEY FIX)
         res.json({
           success: true,
           requestId,
           output: {
-            path: outPath,
+            filename,
             sizeBytes: stats.size,
-            durationMs: duration,
+            durationMs,
+            downloadUrl: `https://${req.headers.host}/download/${filename}`,
           },
         });
 
-        // Cleanup inputs only (keep output for now)
+        // Cleanup inputs only
         [videoPath, audioPath, captionsPath].forEach((p) => {
           if (p && fs.existsSync(p)) {
             try {
