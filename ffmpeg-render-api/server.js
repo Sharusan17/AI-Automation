@@ -6,10 +6,7 @@ const path = require("path");
 
 const app = express();
 
-/**
- * Multer config
- * Use /tmp ONLY (Render allows this)
- */
+// ✅ Keep uploads in /tmp (Render allows this)
 const upload = multer({
   dest: "/tmp",
   limits: {
@@ -17,27 +14,24 @@ const upload = multer({
   },
 });
 
-/**
- * Health checks
- */
+// ✅ Health check
 app.get("/", (req, res) => {
   res.json({ ok: true, message: "FFmpeg Render API is running" });
 });
 
+// ✅ Extra health endpoint (handy for monitoring)
 app.get("/health", (req, res) => {
   res.json({ ok: true });
 });
 
 /**
  * POST /render
- *
  * multipart/form-data:
- * - video   (mp4 background video)
- * - audio   (mp3 voice)
- * - captions (srt) OPTIONAL
+ * - video: mp4 (background video)
+ * - audio: mp3 (voice)
+ * - captions: srt (optional)
  *
- * RESPONSE:
- * JSON ONLY (no video streaming!)
+ * returns: final.mp4
  */
 app.post(
   "/render",
@@ -51,14 +45,44 @@ app.post(
 
     try {
       console.log(`\n==============================`);
-      console.log(`[${requestId}] POST /render started`);
+      console.log(`[${requestId}] Incoming POST /render`);
+      console.log(`[${requestId}] Time: ${new Date().toISOString()}`);
 
-      // Validate uploads
+      // ✅ Log what keys arrived
+      console.log(
+        `[${requestId}] req.files keys:`,
+        Object.keys(req.files || {})
+      );
+      console.log(`[${requestId}] req.body:`, req.body || {});
+
+      // ✅ Detailed file logs (video/audio/captions)
+      const logFile = (label, fileObj) => {
+        if (!fileObj) {
+          console.log(`[${requestId}] ${label}: NOT PROVIDED`);
+          return;
+        }
+        console.log(`[${requestId}] ${label}:`, {
+          fieldname: fileObj.fieldname,
+          originalname: fileObj.originalname,
+          mimetype: fileObj.mimetype,
+          size: fileObj.size,
+          path: fileObj.path,
+        });
+      };
+
+      logFile("VIDEO", req.files?.video?.[0]);
+      logFile("AUDIO", req.files?.audio?.[0]);
+      logFile("CAPTIONS", req.files?.captions?.[0]);
+
+      // ✅ Validate required uploads
       if (!req.files?.video?.[0] || !req.files?.audio?.[0]) {
+        console.log(
+          `[${requestId}] ERROR: Missing required files (video/audio)`
+        );
         return res.status(400).json({
-          success: false,
-          requestId,
           error: "Missing required files: video and audio",
+          requestId,
+          receivedFiles: Object.keys(req.files || {}),
         });
       }
 
@@ -70,18 +94,19 @@ app.post(
 
       console.log(`[${requestId}] videoPath: ${videoPath}`);
       console.log(`[${requestId}] audioPath: ${audioPath}`);
-      console.log(`[${requestId}] captionsPath: ${captionsPath || "none"}`);
+      console.log(`[${requestId}] captionsPath: ${captionsPath || "(none)"}`);
       console.log(`[${requestId}] outPath: ${outPath}`);
 
-      /**
-       * TikTok 9:16 filter
-       */
+      // ✅ Build filter: TikTok 9:16 crop + captions if provided
       let filter =
         "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920";
 
       if (captionsPath) {
-        filter += `,subtitles=${captionsPath}:force_style='Fontsize=48,Outline=2,BorderStyle=1,Alignment=2,MarginV=80'`;
+        // Burn captions with readable style (bottom center)
+        filter += `,subtitles=${captionsPath}:force_style='Fontsize=48,Outline=2,BorderStyle=1,Shadow=0,Alignment=2,MarginV=80'`;
       }
+
+      console.log(`[${requestId}] FFmpeg filter: ${filter}`);
 
       const args = [
         "-y",
@@ -111,94 +136,92 @@ app.post(
 
       const start = Date.now();
 
-      execFile("ffmpeg", args, async (err, stdout, stderr) => {
-        const duration = Date.now() - start;
-        console.log(`[${requestId}] FFmpeg finished in ${duration}ms`);
+      execFile("ffmpeg", args, (err, stdout, stderr) => {
+        const durationMs = Date.now() - start;
+
+        // ✅ Always log FFmpeg output (trim to avoid huge logs)
+        if (stdout) {
+          console.log(
+            `[${requestId}] FFmpeg stdout (first 2000 chars):\n${stdout
+              .toString()
+              .slice(0, 2000)}`
+          );
+        }
 
         if (stderr) {
           console.log(
-            `[${requestId}] FFmpeg stderr (trimmed):\n${stderr
+            `[${requestId}] FFmpeg stderr (first 4000 chars):\n${stderr
               .toString()
               .slice(0, 4000)}`
           );
         }
 
+        console.log(
+          `[${requestId}] FFmpeg completed in ${durationMs}ms`
+        );
+
         if (err) {
-          console.error(`[${requestId}] FFmpeg ERROR`, err);
+          console.error(`[${requestId}] FFmpeg FAILED:`, err);
           return res.status(500).json({
-            success: false,
-            requestId,
             error: "FFmpeg failed",
+            requestId,
             details: stderr?.toString()?.slice(0, 2000),
           });
         }
 
+        // ✅ Ensure output exists
         if (!fs.existsSync(outPath)) {
+          console.error(`[${requestId}] Output file not found: ${outPath}`);
           return res.status(500).json({
-            success: false,
-            requestId,
             error: "Output file not generated",
+            requestId,
           });
         }
 
-        const stats = fs.statSync(outPath);
+        const finalStats = fs.statSync(outPath);
         console.log(
-          `[${requestId}] Output file size: ${stats.size} bytes`
+          `[${requestId}] Output file size: ${finalStats.size} bytes`
         );
 
-        /**
-         * 🚀 PLACEHOLDER: Upload to Google Drive / S3 / R2
-         * -----------------------------------------------
-         * This is where n8n or a Drive SDK upload should happen.
-         *
-         * Example (pseudo):
-         * const driveLink = await uploadToDrive(outPath)
-         */
+        res.setHeader("Content-Type", "video/mp4");
+        res.setHeader(
+          "Content-Disposition",
+          "attachment; filename=final.mp4"
+        );
+        res.setHeader("X-Request-Id", requestId);
 
-        const uploadDriveLink = "PENDING_UPLOAD";
+        const stream = fs.createReadStream(outPath);
+        stream.pipe(res);
 
-        /**
-         * IMPORTANT:
-         * Respond FAST with JSON ONLY
-         */
-        res.json({
-          success: true,
-          requestId,
-          message: "Video rendered successfully",
-          output: {
-            filePath: outPath,
-            sizeBytes: stats.size,
-            driveLink: uploadDriveLink,
-          },
-        });
+        stream.on("close", () => {
+          console.log(`[${requestId}] Response stream closed. Cleaning up...`);
 
-        /**
-         * Cleanup (non-blocking)
-         */
-        setTimeout(() => {
           [videoPath, audioPath, captionsPath, outPath].forEach((p) => {
             if (p && fs.existsSync(p)) {
               try {
                 fs.unlinkSync(p);
-                console.log(`[${requestId}] Deleted ${p}`);
+                console.log(`[${requestId}] Deleted: ${p}`);
               } catch (e) {
                 console.log(
-                  `[${requestId}] Cleanup error for ${p}: ${e.message}`
+                  `[${requestId}] Failed to delete ${p}: ${e.message}`
                 );
               }
             }
           });
 
-          console.log(`[${requestId}] Cleanup complete`);
+          console.log(`[${requestId}] Cleanup complete.`);
           console.log(`==============================\n`);
-        }, 2000);
+        });
+
+        stream.on("error", (e) => {
+          console.error(`[${requestId}] Stream error: ${e.message}`);
+        });
       });
     } catch (e) {
-      console.error(`[${requestId}] SERVER ERROR`, e);
-      res.status(500).json({
-        success: false,
-        requestId,
+      console.error(`[${requestId}] Server error:`, e);
+      return res.status(500).json({
         error: "Server error",
+        requestId,
         details: e.message,
       });
     }
@@ -206,6 +229,4 @@ app.post(
 );
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () =>
-  console.log(`FFmpeg Render API listening on port ${PORT}`)
-);
+app.listen(PORT, () => console.log(`Render API listening on port ${PORT}`));
